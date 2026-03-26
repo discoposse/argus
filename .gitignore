@@ -1,0 +1,56 @@
+# macOS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.py[cod]
+*.egg-info/
+.venv/
+.python-version
+
+# Secrets / local config
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+*.mobileprovision
+
+# Logs / local runtime
+*.log
+tmp/
+.tmp/
+
+# Local media ingest
+/ingest/*
+!/ingest/.gitkeep
+
+# Generated output
+/output/*
+!/output/.gitkeep
+!/output/items/
+!/output/frames/
+/output/items/*
+!/output/items/.gitkeep
+/output/frames/*
+!/output/frames/.gitkeep
+/output/*.db
+/output/*.sqlite
+/output/*.sqlite3
+/output/manifest.json
+
+# Test / scratch media
+*.mp4
+*.mov
+*.m4v
+*.mpg
+*.mpeg
+*.braw
