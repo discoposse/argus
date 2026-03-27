@@ -54,3 +54,6 @@ tmp/
 *.mpg
 *.mpeg
 *.braw
+
+# Local-only drafts
+docs/ARGUS_DISCO_POSSE_POST.md
