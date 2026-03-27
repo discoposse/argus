@@ -90,6 +90,84 @@ def search_index(db_path: Path, query: str, *, limit: int = 10) -> list[dict]:
     return results
 
 
+def query_videos(
+    db_path: Path,
+    *,
+    query: str = "",
+    status: str | None = None,
+    limit: int = 25,
+) -> list[dict]:
+    query = query.strip()
+    if query:
+        results = search_index(db_path, query, limit=max(limit * 3, limit))
+        if status:
+            results = [
+                result
+                for result in results
+                if result["classification_status"] == status
+            ]
+        return results[:limit]
+
+    db_path = db_path.resolve()
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        sql = """
+            SELECT
+              id,
+              filename,
+              path,
+              classification_status,
+              summary,
+              suggested_tags_json,
+              duration_seconds,
+              width,
+              height
+            FROM videos
+        """
+        params: list[object] = []
+        if status:
+            sql += " WHERE classification_status = ?"
+            params.append(status)
+        sql += " ORDER BY file_modified_at DESC LIMIT ?"
+        params.append(limit)
+        rows = connection.execute(sql, params).fetchall()
+    finally:
+        connection.close()
+
+    return [row_to_result(row, match_text="") for row in rows]
+
+
+def fetch_status_options(db_path: Path) -> list[str]:
+    db_path = db_path.resolve()
+    connection = sqlite3.connect(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT classification_status
+            FROM videos
+            WHERE classification_status IS NOT NULL AND classification_status != ''
+            ORDER BY classification_status
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    return [row[0] for row in rows]
+
+
+def get_video_path(db_path: Path, video_id: str) -> str | None:
+    db_path = db_path.resolve()
+    connection = sqlite3.connect(db_path)
+    try:
+        row = connection.execute(
+            "SELECT path FROM videos WHERE id = ?",
+            (video_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return row[0] if row else None
+
+
 def configure_connection(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA foreign_keys = ON")
@@ -289,3 +367,19 @@ def highlight_term(text: str, term: str) -> str:
         return text
     end = index + len(term)
     return text[:index] + "[" + text[index:end] + "]" + text[end:]
+
+
+def row_to_result(row: sqlite3.Row, *, match_text: str) -> dict:
+    return {
+        "id": row["id"],
+        "filename": row["filename"],
+        "path": row["path"],
+        "classification_status": row["classification_status"],
+        "summary": row["summary"],
+        "suggested_tags": json.loads(row["suggested_tags_json"] or "[]"),
+        "duration_seconds": row["duration_seconds"],
+        "width": row["width"],
+        "height": row["height"],
+        "match_text": match_text,
+        "rank": row["rank"] if "rank" in row.keys() else None,
+    }

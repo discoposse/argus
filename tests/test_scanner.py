@@ -18,6 +18,7 @@ from argus.database import index_output_items, search_index
 from argus.dependencies import dependency_report
 from argus.extractor import evenly_spaced_timestamps
 from argus.pipeline import run_scan
+from argus.progress import load_progress
 from argus.scanner import build_video_record, scan_video_files
 from argus.status import build_status_report, render_status_text
 
@@ -303,6 +304,64 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(report["indexed_frames"], 1)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["filename"], "warehouse.mp4")
+
+    def test_query_videos_without_search_returns_recent_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output = root / "output"
+            items = output / "items"
+            items.mkdir(parents=True)
+
+            for index in range(2):
+                record = {
+                    "id": f"video-{index}",
+                    "filename": f"clip-{index}.mp4",
+                    "path": f"/tmp/clip-{index}.mp4",
+                    "extension": ".mp4",
+                    "file_created_at": "2026-03-26T15:00:00+00:00",
+                    "file_modified_at": f"2026-03-26T15:0{index}:00+00:00",
+                    "classification_status": "captions_ready",
+                    "audio_required": False,
+                    "media": {"video": {}},
+                    "summary": f"clip {index}",
+                    "suggested_tags": [f"tag-{index}"],
+                    "sample_frames": {"frames": []},
+                }
+                (items / f"video-{index}.json").write_text(json.dumps(record), encoding="utf-8")
+
+            report = index_output_items(output)
+            from argus.database import query_videos
+
+            results = query_videos(Path(report["db_path"]), limit=10)
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["filename"], "clip-1.mp4")
+
+    @patch("argus.captioner.captioning_preflight")
+    @patch("argus.captioner.caption_item_record")
+    def test_caption_output_items_writes_progress_file(
+        self, caption_item_record_mock, captioning_preflight_mock
+    ) -> None:
+        captioning_preflight_mock.return_value = {"status": "available", "reason": None}
+        caption_item_record_mock.side_effect = (
+            lambda *args, **kwargs: (False, kwargs["progress_state"])
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            items = output_dir / "items"
+            items.mkdir(parents=True)
+            (items / "item.json").write_text(
+                json.dumps({"filename": "clip.mp4", "sample_frames": {"frames": []}}),
+                encoding="utf-8",
+            )
+
+            caption_output_items(output_dir)
+            progress = load_progress(output_dir)
+
+        self.assertIsNotNone(progress)
+        self.assertEqual(progress["phase"], "caption")
+        self.assertEqual(progress["status"], "completed")
 
 
 if __name__ == "__main__":

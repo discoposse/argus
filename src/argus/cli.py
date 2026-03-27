@@ -9,6 +9,7 @@ from argus.config import DEFAULT_OLLAMA_HOST, DEFAULT_VISION_MODEL
 from argus.database import default_db_path, index_output_items, search_index
 from argus.dependencies import dependency_report
 from argus.pipeline import run_scan
+from argus.serve import serve_ui
 from argus.status import build_status_report, run_status_tui
 
 
@@ -193,6 +194,37 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pretty-print search results as JSON.",
     )
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Run a local browser-based search UI for the SQLite index.",
+    )
+    serve_parser.add_argument(
+        "--output-dir",
+        default="output",
+        help="Directory containing the default SQLite database. Defaults to ./output",
+    )
+    serve_parser.add_argument(
+        "--db-path",
+        default=None,
+        help="Optional SQLite database path. Defaults to <output-dir>/argus.db",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host interface to bind. Defaults to 127.0.0.1",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Port to bind. Defaults to 8765",
+    )
+    serve_parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open the UI in your default browser after the server starts.",
+    )
     return parser
 
 
@@ -255,11 +287,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "caption":
+        progress_callback = None
+        if not args.pretty:
+            def progress_callback(payload: dict) -> None:
+                total_frames = payload.get("total_frames") or "?"
+                current_number = payload.get("processed_frames", 0) + 1
+                timestamp = payload.get("frame_timestamp_seconds")
+                timestamp_text = (
+                    f"{timestamp:.3f}s" if isinstance(timestamp, (int, float)) else "?"
+                )
+                print(
+                    f"[caption] {current_number}/{total_frames} "
+                    f"{payload.get('filename')} frame {payload.get('frame_index')} "
+                    f"@ {timestamp_text}",
+                    flush=True,
+                )
         report = caption_output_items(
             Path(args.output_dir),
             model=args.model,
             ollama_host=args.ollama_host,
             force=args.force,
+            progress_callback=progress_callback,
         )
         if args.pretty:
             print(json.dumps(report, indent=2))
@@ -331,6 +379,15 @@ def main(argv: list[str] | None = None) -> int:
             if match_text:
                 print(f"   Match: {match_text}")
         return 0
+
+    if args.command == "serve":
+        db_path = Path(args.db_path) if args.db_path else default_db_path(Path(args.output_dir))
+        return serve_ui(
+            db_path=db_path,
+            host=args.host,
+            port=args.port,
+            open_browser=args.open_browser,
+        )
 
     parser.error(f"Unknown command: {args.command}")
     return 2

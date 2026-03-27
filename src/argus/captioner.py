@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from argus.config import DEFAULT_OLLAMA_HOST, DEFAULT_VISION_MODEL
+from argus.progress import finish_progress, initialize_progress, update_progress
 
 FRAME_CAPTION_PROMPT = (
     "You are classifying a frame from silent B-roll footage for a searchable local media library. "
@@ -33,9 +35,11 @@ def caption_output_items(
     model: str = DEFAULT_VISION_MODEL,
     ollama_host: str = DEFAULT_OLLAMA_HOST,
     force: bool = False,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     output_dir = output_dir.resolve()
     items_dir = output_dir / "items"
+    item_paths = sorted(items_dir.glob("*.json"))
 
     report = {
         "processed_items": 0,
@@ -54,20 +58,37 @@ def caption_output_items(
         report["reason"] = preflight["reason"]
         return report
 
-    for item_path in sorted(items_dir.glob("*.json")):
+    progress_state = initialize_progress(
+        output_dir,
+        phase="caption",
+        total_items=len(item_paths),
+        total_frames=count_total_frames(item_paths),
+        model=model,
+    )
+
+    for item_path in item_paths:
         record = json.loads(item_path.read_text(encoding="utf-8"))
         report["processed_items"] += 1
 
-        updated = caption_item_record(
+        updated, progress_state = caption_item_record(
             record,
             model=model,
             ollama_host=ollama_host,
             force=force,
             report=report,
+            output_dir=output_dir,
+            progress_state=progress_state,
+            progress_callback=progress_callback,
         )
         if updated:
             report["updated_items"] += 1
             item_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        progress_state = update_progress(
+            output_dir,
+            progress_state,
+            completed_items=report["processed_items"],
+            current_item=record.get("filename"),
+        )
 
     manifest_path = output_dir / "manifest.json"
     if manifest_path.exists():
@@ -76,6 +97,7 @@ def caption_output_items(
         manifest["caption_summary"] = report
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
+    finish_progress(output_dir, progress_state, status="completed")
     return report
 
 
@@ -86,16 +108,41 @@ def caption_item_record(
     ollama_host: str,
     force: bool,
     report: dict,
-) -> bool:
+    output_dir: Path,
+    progress_state: dict,
+    progress_callback: Callable[[dict], None] | None,
+) -> tuple[bool, dict]:
     sample_frames = record.get("sample_frames", {})
     frames = sample_frames.get("frames", [])
     if not frames:
-        return False
+        return False, progress_state
 
     updated = False
     captions_for_summary: list[dict] = []
 
     for frame in frames:
+        progress_state = update_progress(
+            output_dir,
+            progress_state,
+            current_item=record.get("filename"),
+            current_frame_index=frame.get("index"),
+            current_frame_timestamp_seconds=frame.get("timestamp_seconds"),
+            completed_items=report["processed_items"] - 1,
+            processed_frames=report["frames_attempted"],
+            completed_frames=report["frames_captioned"] + report["frames_failed"],
+            failed_frames=report["frames_failed"],
+        )
+        if progress_callback:
+            progress_callback(
+                {
+                    "filename": record.get("filename"),
+                    "frame_index": frame.get("index"),
+                    "frame_timestamp_seconds": frame.get("timestamp_seconds"),
+                    "processed_frames": report["frames_attempted"],
+                    "total_frames": progress_state.get("total_frames", 0),
+                }
+            )
+
         report["frames_attempted"] += 1
         if frame.get("status") != "ok":
             report["frames_skipped"] += 1
@@ -141,6 +188,13 @@ def caption_item_record(
             }
             report["frames_failed"] += 1
             updated = True
+        progress_state = update_progress(
+            output_dir,
+            progress_state,
+            processed_frames=report["frames_attempted"],
+            completed_frames=report["frames_captioned"] + report["frames_failed"],
+            failed_frames=report["frames_failed"],
+        )
 
     if captions_for_summary:
         summary_result = summarize_captions(
@@ -166,7 +220,7 @@ def caption_item_record(
             }
         updated = True
 
-    return updated
+    return updated, progress_state
 
 
 def caption_frame(image_path: Path, *, model: str, ollama_host: str) -> dict:
@@ -305,6 +359,14 @@ def load_item_records(items_dir: Path) -> list[dict]:
         json.loads(item_path.read_text(encoding="utf-8"))
         for item_path in sorted(items_dir.glob("*.json"))
     ]
+
+
+def count_total_frames(item_paths: list[Path]) -> int:
+    total = 0
+    for item_path in item_paths:
+        record = json.loads(item_path.read_text(encoding="utf-8"))
+        total += len(record.get("sample_frames", {}).get("frames", []))
+    return total
 
 
 def ollama_healthcheck(ollama_host: str) -> dict:

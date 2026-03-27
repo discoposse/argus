@@ -274,7 +274,8 @@ argus status
 argus status --watch
 argus caption --model gemma3
 argus index
-argus search warehouse
+argus search "<query>"
+argus serve --open-browser
 ```
 
 Defaults:
@@ -324,11 +325,26 @@ To make the library searchable, build the SQLite index after captioning:
 
 ```bash
 argus index
-argus search warehouse
-argus search "heat press"
+argus search "<query>"
+argus search --limit 25 "<query>"
 ```
 
 The SQLite database is stored at `output/argus.db` by default.
+
+To browse the library in a local browser UI:
+
+```bash
+argus serve --open-browser
+```
+
+The server binds to `127.0.0.1:8765` by default and lets you:
+
+- search by content, summary, tags, and visible text
+- filter by classification status
+- copy file paths
+- reveal files directly in Finder
+
+For a complete usage guide, see [docs/USAGE.md](docs/USAGE.md).
 
 ## License
 

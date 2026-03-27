@@ -1,0 +1,559 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import webbrowser
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from argus.database import fetch_status_options, get_video_path, query_videos
+
+
+def serve_ui(
+    *,
+    db_path: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    open_browser: bool = False,
+) -> int:
+    db_path = db_path.resolve()
+    handler_class = build_handler(db_path)
+    server = ThreadingHTTPServer((host, port), handler_class)
+    url = f"http://{host}:{port}"
+    print(f"Argus UI running at {url}")
+    print(f"Database: {db_path}")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped server.")
+    finally:
+        server.server_close()
+    return 0
+
+
+def build_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
+    class ArgusHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path == "/":
+                self.respond_html(render_index_html())
+                return
+            if parsed.path == "/api/meta":
+                self.respond_json(
+                    {
+                        "statuses": fetch_status_options(db_path),
+                    }
+                )
+                return
+            if parsed.path == "/api/search":
+                params = parse_qs(parsed.query)
+                query = params.get("q", [""])[0]
+                status = params.get("status", [""])[0] or None
+                limit_text = params.get("limit", ["25"])[0]
+                try:
+                    limit = max(1, min(100, int(limit_text)))
+                except ValueError:
+                    limit = 25
+                results = query_videos(
+                    db_path,
+                    query=query,
+                    status=status,
+                    limit=limit,
+                )
+                self.respond_json({"results": results, "count": len(results)})
+                return
+            self.respond_not_found()
+
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/reveal":
+                content_length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
+                try:
+                    payload = json.loads(raw_body)
+                except json.JSONDecodeError:
+                    self.respond_json({"error": "Invalid JSON body"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+
+                video_id = payload.get("id")
+                if not isinstance(video_id, str) or not video_id:
+                    self.respond_json({"error": "Missing video id"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+
+                path = get_video_path(db_path, video_id)
+                if path is None:
+                    self.respond_json({"error": "Video not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+
+                try:
+                    subprocess.run(["open", "-R", path], check=True)
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    self.respond_json(
+                        {"error": f"Failed to reveal file: {exc}"},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    return
+
+                self.respond_json({"ok": True, "path": path})
+                return
+
+            self.respond_not_found()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+        def respond_html(self, body: str, *, status: HTTPStatus = HTTPStatus.OK) -> None:
+            encoded = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def respond_json(self, payload: dict, *, status: HTTPStatus = HTTPStatus.OK) -> None:
+            encoded = (json.dumps(payload) + "\n").encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def respond_not_found(self) -> None:
+            self.respond_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+
+    return ArgusHandler
+
+
+def render_index_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Argus Local Search</title>
+  <style>
+    :root {
+      --paper: #f5efe3;
+      --ink: #1e1d1a;
+      --muted: #655f56;
+      --accent: #bd4b2e;
+      --accent-soft: rgba(189, 75, 46, 0.12);
+      --panel: rgba(255, 251, 244, 0.92);
+      --line: rgba(30, 29, 26, 0.11);
+      --shadow: 0 24px 80px rgba(30, 29, 26, 0.12);
+      --radius: 22px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(189, 75, 46, 0.18), transparent 28rem),
+        radial-gradient(circle at bottom right, rgba(81, 124, 97, 0.14), transparent 24rem),
+        linear-gradient(180deg, #fbf6ee 0%, var(--paper) 100%);
+      min-height: 100vh;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.22;
+      background-image:
+        linear-gradient(rgba(30, 29, 26, 0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(30, 29, 26, 0.06) 1px, transparent 1px);
+      background-size: 32px 32px;
+      mask-image: linear-gradient(180deg, rgba(0,0,0,0.55), transparent 88%);
+    }
+    main {
+      width: min(1120px, calc(100vw - 2rem));
+      margin: 0 auto;
+      padding: 2rem 0 4rem;
+    }
+    .hero {
+      display: grid;
+      gap: 1rem;
+      padding: 1.5rem 0 1rem;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      width: fit-content;
+      padding: 0.45rem 0.8rem;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.55);
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(2.6rem, 9vw, 6rem);
+      line-height: 0.92;
+      letter-spacing: -0.04em;
+      max-width: 10ch;
+    }
+    .hero p {
+      margin: 0;
+      max-width: 56rem;
+      color: var(--muted);
+      font-size: 1.04rem;
+      line-height: 1.6;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+    .controls {
+      display: grid;
+      gap: 1rem;
+      padding: 1rem;
+      grid-template-columns: 1.6fr 0.8fr 0.45fr;
+      position: sticky;
+      top: 1rem;
+      z-index: 5;
+      margin-bottom: 1rem;
+    }
+    .control {
+      display: grid;
+      gap: 0.4rem;
+    }
+    label {
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    input, select, button {
+      font: inherit;
+    }
+    input[type="search"], select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.78);
+      color: var(--ink);
+      padding: 0.95rem 1rem;
+      outline: none;
+    }
+    input[type="search"]:focus, select:focus {
+      border-color: rgba(189, 75, 46, 0.5);
+      box-shadow: 0 0 0 4px rgba(189, 75, 46, 0.12);
+    }
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      padding: 0 0.3rem 1rem;
+      color: var(--muted);
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.84rem;
+    }
+    .results {
+      display: grid;
+      gap: 1rem;
+    }
+    .card {
+      padding: 1.1rem 1.15rem 1rem;
+      display: grid;
+      gap: 0.9rem;
+    }
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: start;
+    }
+    .card h2 {
+      margin: 0 0 0.25rem;
+      font-size: 1.45rem;
+      line-height: 1.02;
+    }
+    .status-pill {
+      padding: 0.45rem 0.7rem;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+    .path {
+      margin: 0;
+      color: var(--muted);
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.82rem;
+      word-break: break-all;
+    }
+    .summary, .match {
+      margin: 0;
+      line-height: 1.55;
+      color: var(--ink);
+    }
+    .match {
+      color: var(--muted);
+      font-style: italic;
+    }
+    .stats {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .tags {
+      display: flex;
+      gap: 0.55rem;
+      flex-wrap: wrap;
+    }
+    .tag {
+      padding: 0.5rem 0.72rem;
+      border-radius: 999px;
+      background: rgba(30, 29, 26, 0.06);
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.76rem;
+    }
+    .actions {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .button {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.82);
+      border-radius: 14px;
+      padding: 0.72rem 0.95rem;
+      cursor: pointer;
+      transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.8rem;
+    }
+    .button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(189, 75, 46, 0.45);
+      background: rgba(255,255,255,0.96);
+    }
+    .empty {
+      padding: 1.6rem;
+      text-align: center;
+      color: var(--muted);
+    }
+    .toast {
+      position: fixed;
+      right: 1rem;
+      bottom: 1rem;
+      padding: 0.85rem 1rem;
+      border-radius: 16px;
+      background: rgba(30, 29, 26, 0.92);
+      color: #fff;
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.8rem;
+      opacity: 0;
+      transform: translateY(10px);
+      pointer-events: none;
+      transition: opacity 180ms ease, transform 180ms ease;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    mark {
+      background: rgba(189, 75, 46, 0.16);
+      color: inherit;
+      padding: 0.05em 0.22em;
+      border-radius: 0.25em;
+    }
+    @media (max-width: 820px) {
+      .controls {
+        grid-template-columns: 1fr;
+      }
+      .card-top {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <span class="eyebrow">Argus Local Search</span>
+      <h1>Find clips by what’s actually in them.</h1>
+      <p>
+        Search summaries, tags, frame captions, and visible text from your local SQLite index.
+        Copy the path or reveal the source file directly in Finder.
+      </p>
+    </section>
+
+    <section class="controls panel">
+      <div class="control">
+        <label for="query">Search</label>
+        <input id="query" type="search" placeholder="Search by filename, tag, summary, caption, or visible text" autocomplete="off">
+      </div>
+      <div class="control">
+        <label for="status">Status</label>
+        <select id="status">
+          <option value="">All statuses</option>
+        </select>
+      </div>
+      <div class="control">
+        <label for="limit">Limit</label>
+        <select id="limit">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+        </select>
+      </div>
+    </section>
+
+    <div class="meta">
+      <span id="resultCount">Loading…</span>
+      <span>localhost only</span>
+    </div>
+
+    <section id="results" class="results"></section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const queryInput = document.getElementById("query");
+    const statusSelect = document.getElementById("status");
+    const limitSelect = document.getElementById("limit");
+    const resultsEl = document.getElementById("results");
+    const resultCountEl = document.getElementById("resultCount");
+    const toastEl = document.getElementById("toast");
+
+    let debounceTimer = null;
+
+    async function loadMeta() {
+      const response = await fetch("/api/meta");
+      const payload = await response.json();
+      for (const status of payload.statuses) {
+        const option = document.createElement("option");
+        option.value = status;
+        option.textContent = status;
+        statusSelect.appendChild(option);
+      }
+    }
+
+    function showToast(message) {
+      toastEl.textContent = message;
+      toastEl.classList.add("show");
+      window.clearTimeout(showToast._timer);
+      showToast._timer = window.setTimeout(() => {
+        toastEl.classList.remove("show");
+      }, 1800);
+    }
+
+    function highlightBrackets(text) {
+      return text.replaceAll("[", "<mark>").replaceAll("]", "</mark>");
+    }
+
+    function renderResults(results) {
+      resultCountEl.textContent = `${results.length} result${results.length === 1 ? "" : "s"}`;
+      if (!results.length) {
+        resultsEl.innerHTML = `<article class="panel empty">No matches yet. Try a broader search or clear the status filter.</article>`;
+        return;
+      }
+
+      resultsEl.innerHTML = results.map((result) => {
+        const tags = (result.suggested_tags || []).map((tag) => `<span class="tag">${tag}</span>`).join("");
+        const summary = result.summary ? `<p class="summary">${result.summary}</p>` : "";
+        const match = result.match_text ? `<p class="match">${highlightBrackets(result.match_text)}</p>` : "";
+        const duration = typeof result.duration_seconds === "number" ? `${result.duration_seconds.toFixed(2)}s` : "unknown";
+        const resolution = result.width && result.height ? `${result.width}×${result.height}` : "unknown";
+        return `
+          <article class="panel card" data-id="${result.id}">
+            <div class="card-top">
+              <div>
+                <h2>${result.filename}</h2>
+                <p class="path">${result.path}</p>
+              </div>
+              <span class="status-pill">${result.classification_status || "unknown"}</span>
+            </div>
+            <div class="stats">
+              <span>${duration}</span>
+              <span>${resolution}</span>
+            </div>
+            ${summary}
+            ${match}
+            <div class="tags">${tags}</div>
+            <div class="actions">
+              <button class="button" data-action="copy">Copy Path</button>
+              <button class="button" data-action="reveal">Reveal in Finder</button>
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    async function runSearch() {
+      const params = new URLSearchParams({
+        q: queryInput.value,
+        status: statusSelect.value,
+        limit: limitSelect.value
+      });
+      resultCountEl.textContent = "Searching…";
+      const response = await fetch(`/api/search?${params.toString()}`);
+      const payload = await response.json();
+      renderResults(payload.results || []);
+    }
+
+    function scheduleSearch() {
+      window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(runSearch, 180);
+    }
+
+    resultsEl.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (!button) return;
+      const card = event.target.closest("[data-id]");
+      const id = card?.dataset.id;
+      const path = card?.querySelector(".path")?.textContent || "";
+      if (!id) return;
+
+      if (button.dataset.action === "copy") {
+        await navigator.clipboard.writeText(path);
+        showToast("Path copied");
+        return;
+      }
+
+      if (button.dataset.action === "reveal") {
+        const response = await fetch("/api/reveal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id })
+        });
+        if (response.ok) {
+          showToast("Revealed in Finder");
+        } else {
+          const payload = await response.json();
+          showToast(payload.error || "Reveal failed");
+        }
+      }
+    });
+
+    queryInput.addEventListener("input", scheduleSearch);
+    statusSelect.addEventListener("change", runSearch);
+    limitSelect.addEventListener("change", runSearch);
+
+    loadMeta().then(runSearch);
+  </script>
+</body>
+</html>"""

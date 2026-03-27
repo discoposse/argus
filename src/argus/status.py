@@ -10,6 +10,7 @@ from pathlib import Path
 from argus.config import DEFAULT_OLLAMA_HOST, DEFAULT_VISION_MODEL
 from argus.database import default_db_path
 from argus.dependencies import dependency_report
+from argus.progress import load_progress
 from argus.scanner import scan_video_files
 
 
@@ -29,6 +30,7 @@ def build_status_report(
     item_records = load_item_records(items_dir)
     manifest = load_json(manifest_path)
     db_path = default_db_path(output_dir)
+    progress = load_progress(output_dir)
 
     status_counts = Counter(
         record.get("classification_status", "unknown") for record in item_records
@@ -88,6 +90,7 @@ def build_status_report(
         "manifest_generated_at": manifest.get("generated_at") if manifest else None,
         "database_exists": db_path.exists(),
         "database_path": str(db_path),
+        "progress": progress,
         "ingest_count": len(ingest_files),
         "item_count": len(item_records),
         "inventory_progress": ratio(len(item_records), len(ingest_files)),
@@ -144,6 +147,23 @@ def render_status_text(report: dict) -> str:
         f"{report['frame_errors']} error(s)"
     )
     lines.append(f"Item status:     {format_counter(report['status_counts'])}")
+    if report["progress"]:
+        progress = report["progress"]
+        lines.append(
+            f"Live job:        {progress['phase']} {progress['status']} | "
+            f"items {progress['completed_items']}/{progress['total_items']} | "
+            f"frames {progress.get('processed_frames', progress['completed_frames'])}/"
+            f"{progress['total_frames']}"
+        )
+        if progress.get("current_item"):
+            lines.append(
+                f"Current item:    {progress['current_item']}"
+                + (
+                    f" (frame {progress['current_frame_index']})"
+                    if progress.get("current_frame_index")
+                    else ""
+                )
+            )
     lines.append("")
 
     deps = report["dependencies"]["dependencies"]
