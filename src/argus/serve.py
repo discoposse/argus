@@ -10,6 +10,48 @@ from urllib.parse import parse_qs, urlparse
 
 from argus.database import fetch_status_options, get_video_path, query_videos
 
+DEMO_RESULTS = [
+    {
+        "id": "demo-001",
+        "filename": "clip-001.mp4",
+        "path": "/Volumes/Media/Project-A/clip-001.mp4",
+        "classification_status": "captions_ready",
+        "summary": "A person walks through a bright office hallway while carrying a laptop.",
+        "suggested_tags": ["office", "hallway", "person", "walking", "laptop"],
+        "duration_seconds": 14.2,
+        "width": 1920,
+        "height": 1080,
+        "match_text": "A person walks through a bright [office] hallway while carrying a laptop.",
+        "rank": None,
+    },
+    {
+        "id": "demo-002",
+        "filename": "clip-002.mp4",
+        "path": "/Volumes/Media/Project-B/clip-002.mp4",
+        "classification_status": "captions_ready",
+        "summary": "Close-up footage of hands arranging product boxes on a worktable.",
+        "suggested_tags": ["close-up", "hands", "boxes", "table", "product"],
+        "duration_seconds": 9.6,
+        "width": 3840,
+        "height": 2160,
+        "match_text": "Close-up footage of [hands] arranging product boxes on a worktable.",
+        "rank": None,
+    },
+    {
+        "id": "demo-003",
+        "filename": "clip-003.mp4",
+        "path": "/Volumes/Media/Project-C/clip-003.mp4",
+        "classification_status": "captions_ready",
+        "summary": "Wide exterior shot of a storefront with people entering and leaving.",
+        "suggested_tags": ["exterior", "wide shot", "storefront", "people"],
+        "duration_seconds": 22.8,
+        "width": 1920,
+        "height": 1080,
+        "match_text": "Wide [exterior] shot of a storefront with people entering and leaving.",
+        "rank": None,
+    },
+]
+
 
 def serve_ui(
     *,
@@ -41,6 +83,9 @@ def build_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             if parsed.path == "/":
                 self.respond_html(render_index_html())
+                return
+            if parsed.path == "/demo":
+                self.respond_html(render_index_html(demo_mode=True))
                 return
             if parsed.path == "/api/meta":
                 self.respond_json(
@@ -128,8 +173,9 @@ def build_handler(db_path: Path) -> type[BaseHTTPRequestHandler]:
     return ArgusHandler
 
 
-def render_index_html() -> str:
-    return """<!doctype html>
+def render_index_html(*, demo_mode: bool = False) -> str:
+    demo_json = json.dumps(DEMO_RESULTS)
+    html = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -354,6 +400,16 @@ def render_index_html() -> str:
       text-align: center;
       color: var(--muted);
     }
+    .demo-banner {
+      margin-bottom: 1rem;
+      padding: 0.9rem 1rem;
+      border: 1px dashed rgba(189, 75, 46, 0.38);
+      border-radius: 18px;
+      background: rgba(189, 75, 46, 0.08);
+      font-family: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
     .toast {
       position: fixed;
       right: 1rem;
@@ -426,6 +482,8 @@ def render_index_html() -> str:
       <span>localhost only</span>
     </div>
 
+    __DEMO_BANNER__
+
     <section id="results" class="results"></section>
   </main>
 
@@ -438,10 +496,22 @@ def render_index_html() -> str:
     const resultsEl = document.getElementById("results");
     const resultCountEl = document.getElementById("resultCount");
     const toastEl = document.getElementById("toast");
+    const demoMode = __DEMO_MODE__;
+    const demoResults = __DEMO_JSON__;
 
     let debounceTimer = null;
 
     async function loadMeta() {
+      if (demoMode) {
+        const statuses = [...new Set(demoResults.map((item) => item.classification_status))].sort();
+        for (const status of statuses) {
+          const option = document.createElement("option");
+          option.value = status;
+          option.textContent = status;
+          statusSelect.appendChild(option);
+        }
+        return;
+      }
       const response = await fetch("/api/meta");
       const payload = await response.json();
       for (const status of payload.statuses) {
@@ -504,6 +574,25 @@ def render_index_html() -> str:
     }
 
     async function runSearch() {
+      if (demoMode) {
+        const query = queryInput.value.trim().toLowerCase();
+        const status = statusSelect.value;
+        const limit = Number(limitSelect.value || 25);
+        const filtered = demoResults.filter((result) => {
+          if (status && result.classification_status !== status) return false;
+          if (!query) return true;
+          const haystack = [
+            result.filename,
+            result.path,
+            result.summary,
+            ...(result.suggested_tags || []),
+            result.match_text
+          ].join(" ").toLowerCase();
+          return haystack.includes(query);
+        }).slice(0, limit);
+        renderResults(filtered);
+        return;
+      }
       const params = new URLSearchParams({
         q: queryInput.value,
         status: statusSelect.value,
@@ -535,6 +624,10 @@ def render_index_html() -> str:
       }
 
       if (button.dataset.action === "reveal") {
+        if (demoMode) {
+          showToast("Reveal is disabled in demo mode");
+          return;
+        }
         const response = await fetch("/api/reveal", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -553,7 +646,24 @@ def render_index_html() -> str:
     statusSelect.addEventListener("change", runSearch);
     limitSelect.addEventListener("change", runSearch);
 
-    loadMeta().then(runSearch);
+    loadMeta().then(() => {
+      if (demoMode) {
+        renderResults(demoResults.slice(0, Number(limitSelect.value || 25)));
+        return;
+      }
+      resultCountEl.textContent = "Type a search or choose a filter to begin.";
+      resultsEl.innerHTML = `<article class="panel empty">Start with a keyword, tag, filename, or status filter. The UI runs entirely on your local machine.</article>`;
+    });
   </script>
 </body>
 </html>"""
+    demo_banner = (
+        "<div class='demo-banner'>Demo mode is showing example records only. Reveal-in-Finder is disabled.</div>"
+        if demo_mode
+        else ""
+    )
+    return (
+        html.replace("__DEMO_MODE__", "true" if demo_mode else "false")
+        .replace("__DEMO_JSON__", demo_json)
+        .replace("__DEMO_BANNER__", demo_banner)
+    )

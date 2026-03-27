@@ -4,6 +4,50 @@ Local-first video library indexing for creators and agencies.
 
 Argus is meant to scan a folder of video files, extract useful visual metadata, and produce searchable structured output without sending footage to a cloud API.
 
+## Start Here
+
+Argus is for video teams who want a local workflow, not a cloud asset manager.
+
+If you are comfortable in a terminal, you can run the whole pipeline directly.
+If you are not especially technical, the simplest mental model is:
+
+1. put source videos into `ingest/`
+2. run a few commands
+3. open the browser UI
+4. search by filename, tags, captions, or visible text
+
+The browser UI is intentionally local and simple:
+
+![Argus Browser UI Overview](docs/screenshots/argus-ui-overview.png)
+
+![Argus Browser UI Results](docs/screenshots/argus-ui-results.png)
+
+## First Successful Run
+
+If you want the shortest path from zero to working search, use this:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
+brew install ffmpeg
+ollama pull gemma3
+argus doctor --model gemma3
+argus scan --sample-frames --frame-count 4
+argus caption --model gemma3
+argus index
+argus serve --open-browser
+```
+
+When the browser opens, you can:
+
+- search by content words
+- filter by classification status
+- copy the source path
+- reveal the file in Finder
+
+If you want a more detailed walkthrough, see [docs/USAGE.md](docs/USAGE.md).
+
 ## Current Status
 
 The repository currently includes the first runnable slice:
